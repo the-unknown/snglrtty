@@ -136,3 +136,52 @@ jobs:
         with:
           body_path: CHANGELOG_RELEASE.md
           files: release-assets/*
+
+  publish-aur:
+    needs: [release]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup environment
+        run: |
+          pacman -Syu --noconfirm git openssh
+
+      - name: Configure SSH for AUR
+        run: |
+          mkdir -p /root/.ssh
+          echo "${{ secrets.AUR_SSH_PRIVATE_KEY }}" > /root/.ssh/id_ed25519
+          chmod 600 /root/.ssh/id_ed25519
+          echo "Host aur.archlinux.org" >> /root/.ssh/config
+          echo "  IdentityFile /root/.ssh/id_ed25519" >> /root/.ssh/config
+          echo "  StrictHostKeyChecking accept-new" >> /root/.ssh/config
+
+      - name: Update AUR package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          TARBALL_URL="https://github.com/the-unknown/snglrtty/archive/v${VERSION}.tar.gz"
+
+          curl -sL "${TARBALL_URL}" -o source.tar.gz
+          SHA256=$(sha256sum source.tar.gz | cut -d' ' -f1)
+
+          git clone ssh://aur@aur.archlinux.org/snglrtty.git /tmp/snglrtty-aur
+
+          cp aur/PKGBUILD /tmp/snglrtty-aur/PKGBUILD
+          cd /tmp/snglrtty-aur
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('${SHA256}')/" PKGBUILD
+
+          useradd -m builder
+          chown -R builder:builder .
+          su builder -c "makepkg --printsrcinfo > .SRCINFO"
+
+          git config --global safe.directory /tmp/snglrtty-aur
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet || {
+            git commit -m "Update to ${VERSION}"
+            git push
+          }
