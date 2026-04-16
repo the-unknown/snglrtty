@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install PulseAudio dev libraries
+        run: sudo apt-get install -y libpulse-dev
+
+      - name: Install packaging tools
+        run: cargo install cargo-deb cargo-generate-rpm
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build .deb package
+        run: cargo deb --no-build
+
+      - name: Build .rpm package
+        run: cargo generate-rpm
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="snglrtty-${VERSION}-x86_64-linux.tar.gz"
+          tar -czf "${ARCHIVE}" -C target/release snglrtty -C ../../ README.md LICENSE
+          echo "TARBALL=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
+            snglrtty-*.tar.gz
+
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup build environment
+        run: |
+          pacman -Syu --noconfirm rust git zstd libpulse
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Create Arch package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          mkdir -p pkg/usr/bin
+          mkdir -p pkg/usr/share/doc/snglrtty
+          mkdir -p pkg/usr/share/licenses/snglrtty
+
+          cp target/release/snglrtty pkg/usr/bin/
+          cp README.md pkg/usr/share/doc/snglrtty/
+          cp LICENSE pkg/usr/share/licenses/snglrtty/
+
+          PKGSIZE=$(du -sb pkg | cut -f1)
+          cat > pkg/.PKGINFO <<-EOF
+          pkgname = snglrtty
+          pkgver = ${VERSION}-1
+          pkgdesc = Terminal audio visualizer — singularity in your TTY
+          builddate = $(date -u +%s)
+          packager = GitHub Actions
+          size = ${PKGSIZE}
+          arch = x86_64
+          license = MIT
+          EOF
+          sed -i 's/^[[:space:]]*//' pkg/.PKGINFO
+
+          cd pkg
+          bsdtar -cf - .PKGINFO usr/ | zstd -o "../snglrtty-${VERSION}-1-x86_64.pkg.tar.zst"
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-package
+          path: "*.pkg.tar.zst"
+
+  release:
+    needs: [build-linux, build-arch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir release-assets
+          find artifacts -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.tar.gz" -o -name "*.pkg.tar.zst" \) \
+            -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Build Changelog
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          configuration: "configuration.json"
+          commitMode: true
+          outputFile: CHANGELOG_RELEASE.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: CHANGELOG_RELEASE.md
+          files: release-assets/*
