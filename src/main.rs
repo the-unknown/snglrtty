@@ -157,8 +157,8 @@ fn main() {
     let mut buf = vec![0u8; 200 * 4];
 
     let (Width(w), Height(h)) = terminal_size().unwrap_or((Width(80), Height(40)));
-    let width = w as usize;
-    let height = h as usize;
+    let mut width = w as usize;
+    let mut height = h as usize;
     let mut buffer = vec![vec![0.0f32; width]; height];
     let palette = get_palette(&args.theme);
 
@@ -168,6 +168,16 @@ fn main() {
     }
 
     loop {
+        let (Width(nw), Height(nh)) = terminal_size().unwrap_or((Width(80), Height(40)));
+        let (nw, nh) = (nw as usize, nh as usize);
+        if nw != width || nh != height {
+            width = nw;
+            height = nh;
+            buffer = vec![vec![0.0f32; width]; height];
+            print!("\x1B[2J\x1B[H");
+            io::stdout().flush().unwrap();
+        }
+
         for row in buffer.iter_mut() {
             for val in row.iter_mut() {
                 *val *= args.decay;
@@ -204,9 +214,11 @@ fn main() {
 
         for i in 0..360 {
             let angle = ((i as f32) / 360.0) * 2.0 * PI;
-            let x = (cx + radius * angle.cos() * 2.0) as usize;
-            let y = (cy + radius * angle.sin()) as usize;
-            buffer[y][x] = 1.0;
+            let x = (cx + radius * angle.cos() * 2.0).max(0.0) as usize;
+            let y = (cy + radius * angle.sin()).max(0.0) as usize;
+            if y < height && x < width {
+                buffer[y][x] = 1.0;
+            }
         }
 
         for i in 0..n_bars {
@@ -214,12 +226,16 @@ fn main() {
             let bar_len = (bar_amplitudes[i] * 20.0) as usize;
             for step in 0..bar_len {
                 let r = radius + (step as f32);
-                let bx = (cx + r * angle.cos() * 2.0) as usize;
-                let by = (cy + r * angle.sin()) as usize;
+                let bx = (cx + r * angle.cos() * 2.0).max(0.0) as usize;
+                let by = (cy + r * angle.sin()).max(0.0) as usize;
                 if by < height && bx < width {
                     buffer[by][bx] = 1.0;
                 }
             }
+        }
+
+        if height == 0 || width == 0 {
+            continue;
         }
 
         for (i, row) in buffer.iter().enumerate() {
